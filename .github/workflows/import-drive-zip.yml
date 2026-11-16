@@ -1,0 +1,90 @@
+name: Import Drive ZIP (Git LFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_file_id:
+        description: "Google Drive file ID"
+        required: true
+        default: "1IPfXa3i5JzHNcnOxZpqg4GlniejFRj1t"
+      target_name:
+        description: "File name to store under imports/"
+        required: true
+        default: "Probably-Stolen-Cyberpunk-Shopkeeper-Sim-AnkerGames.zip"
+      expected_bytes:
+        description: "Expected size in bytes (from Drive metadata)"
+        required: true
+        default: "402738276"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-drive-zip
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: true
+
+      - name: Refuse to overwrite existing files
+        run: |
+          set -euo pipefail
+          if [ -e "imports/${{ inputs.target_name }}" ]; then
+            echo "imports/${{ inputs.target_name }} already exists. Aborting."
+            exit 1
+          fi
+
+      - name: Download ZIP from Google Drive (cloud, no extraction)
+        env:
+          FILE_ID: ${{ inputs.drive_file_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p imports
+          curl -fL --retry 5 --retry-delay 10 \
+            "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" \
+            -o "imports/${{ inputs.target_name }}"
+
+      - name: Verify size, ZIP integrity and checksum (no extraction)
+        run: |
+          set -euo pipefail
+          f="imports/${{ inputs.target_name }}"
+          actual=$(stat -c %s "$f")
+          expected="${{ inputs.expected_bytes }}"
+          echo "Expected bytes: $expected"
+          echo "Actual bytes:   $actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "Size mismatch: download incomplete or wrong file."
+            exit 1
+          fi
+          # Test archive structure only; nothing is extracted.
+          unzip -tq "$f"
+          sha256sum "$f" | tee imports/SHA256SUMS.txt
+
+      - name: Track ZIP with Git LFS and commit
+        run: |
+          set -euo pipefail
+          git lfs install --local
+          git lfs track "imports/*.zip"
+          git add .gitattributes imports/SHA256SUMS.txt "imports/${{ inputs.target_name }}"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Import original ZIP via Git LFS: ${{ inputs.target_name }}"
+
+      - name: Push to the branch that ran this workflow
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Verify LFS upload
+        run: |
+          set -euo pipefail
+          git lfs ls-files
+          git lfs fsck --pointers
+          echo "Import complete."
